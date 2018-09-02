@@ -23,7 +23,7 @@ import aialgorithms.proto2.RecordProto2
 import aialgorithms.proto2.RecordProto2.{MapEntry, Record, Value}
 import aialgorithms.proto2.RecordProto2.Record.Builder
 
-import org.apache.spark.ml.linalg.{DenseVector, SparseVector, Vector}
+import org.apache.spark.ml.linalg.{DenseMatrix, DenseVector, Matrix, SparseMatrix, SparseVector, Vector}
 import org.apache.spark.sql.Row
 
 /**
@@ -65,8 +65,13 @@ object ProtobufConverter {
     val hasFeaturesColumn = row.schema.fieldNames.contains(featuresFieldName)
 
     if (hasFeaturesColumn) {
-      val vector = row.getAs[Vector](featuresFieldName)
-      setFeatures(protobufBuilder, vector)
+      val idx = row.fieldIndex(featuresFieldName)
+      val target = row.get(idx) match {
+        case v : Vector =>
+          setFeatures(protobufBuilder, v)
+        case m : Matrix =>
+          setFeatures(protobufBuilder, m)
+      }
     } else if (!hasFeaturesColumn) {
       throw new IllegalArgumentException(s"Need a features column with a " +
         s"Vector of doubles named $featuresFieldName to convert row to protobuf")
@@ -186,6 +191,53 @@ object ProtobufConverter {
           featuresTensorBuilder.addKeys(v.indices(i))
           featuresTensorBuilder.addValues(v.values(i).toFloat)
         }
+        featuresTensorBuilder.build()
+    }
+    val featuresValue = Value.newBuilder().setFloat32Tensor(featuresTensor).build
+    val mapEntry = MapEntry.newBuilder().setKey(ValuesIdentifierString)
+      .setValue(featuresValue).build
+    protobufBuilder.addFeatures(mapEntry)
+  }
+
+  private def setFeatures(protobufBuilder: Record.Builder,
+                                   matrix: Matrix): Record.Builder = {
+    val featuresTensorBuilder = Value.newBuilder().getFloat32TensorBuilder()
+
+    // Matrix shape must be recorded for both dense/sparse matrices
+    featuresTensorBuilder.addShape(matrix.numRows)
+    featuresTensorBuilder.addShape(matrix.numCols)
+
+    val featuresTensor = matrix match {
+      case v: DenseMatrix =>
+        for (value <- v.values) {
+          featuresTensorBuilder.addValues(value.toFloat)
+        }
+        featuresTensorBuilder.build()
+      case v: SparseMatrix =>
+
+        // TODO assume nonTransposed Matrix
+        var idx = 0
+        val c = 0
+
+        for (col <- v.colPtrs) {
+          while (idx < col) {
+            val r = v.rowIndices(idx);
+            featuresTensorBuilder.addValues(v.values(idx).toFloat)
+            idx = idx + 1
+          }
+        }
+
+        // Register the size of rowIdx and colPtrs
+        featuresTensorBuilder.addKeys(v.rowIndices.size)
+        featuresTensorBuilder.addKeys(v.colPtrs.size)
+        for (row <- v.rowIndices) {
+          featuresTensorBuilder.addKeys(row)
+        }
+
+        for (col <- v.colPtrs) {
+          featuresTensorBuilder.addKeys(col)
+        }
+
         featuresTensorBuilder.build()
     }
     val featuresValue = Value.newBuilder().setFloat32Tensor(featuresTensor).build

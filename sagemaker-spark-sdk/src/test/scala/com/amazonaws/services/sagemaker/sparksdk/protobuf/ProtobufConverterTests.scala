@@ -18,14 +18,15 @@ package com.amazonaws.services.sagemaker.sparksdk.protobuf
 import java.nio.{ByteBuffer, ByteOrder}
 
 import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._
 
 import aialgorithms.proto2.RecordProto2
 import aialgorithms.proto2.RecordProto2.Record
 import org.scalatest.{BeforeAndAfter, FlatSpec}
 import org.scalatest.mock.MockitoSugar
 
-import org.apache.spark.ml.linalg.{DenseVector, SparseVector}
-import org.apache.spark.ml.linalg.SQLDataTypes.VectorType
+import org.apache.spark.ml.linalg.{DenseMatrix, DenseVector, SparseMatrix, SparseVector}
+import org.apache.spark.ml.linalg.SQLDataTypes.{MatrixType, VectorType}
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema
 import org.apache.spark.sql.types.{DoubleType, StructField, StructType}
@@ -38,22 +39,36 @@ class ProtobufConverterTests extends FlatSpec with MockitoSugar with BeforeAndAf
   val denseFeatures : DenseVector = new DenseVector((1d to 100d by 1d).toArray)
   val sparseFeatures : SparseVector = new SparseVector(100, (1 to 100 by 10).toArray,
     (1d to 100d by 10d).toArray)
+  val denseMatrixFeatures : DenseMatrix = new DenseMatrix(20, 10, (1d to 200d by 1d).toArray)
+  val sparseMatrixFeatures : SparseMatrix = SparseMatrix.spdiag(new DenseVector((1d to 10d by 1d).toArray))
   val labelColumnName = "label"
   val featuresColumnName = "features"
   val schemaWithoutLabels : StructType = new StructType().add(StructField(
     featuresColumnName, VectorType, true))
+  val schemaMatrixWithoutLabels : StructType = new StructType().add(StructField(
+    featuresColumnName, MatrixType, true))
   val schemaWithLabelsAndFeatures: StructType = new StructType()
                 .add(StructField(labelColumnName, DoubleType, true))
-                .add(StructField(featuresColumnName, VectorType, true))
+    .add(StructField(featuresColumnName, VectorType, true))
+  val schemaMatrixWithLabelsAndFeatures: StructType = new StructType()
+                .add(StructField(labelColumnName, DoubleType, true))
+                .add(StructField(featuresColumnName, MatrixType, true))
   val denseRowWithLabels : Row = new GenericRowWithSchema(Array(label, denseFeatures),
     schemaWithLabelsAndFeatures)
   val sparseRowWithLabels : Row = new GenericRowWithSchema(Array(label, sparseFeatures),
     schemaWithLabelsAndFeatures)
+  val denseMatrixRowWithLabels : Row = new GenericRowWithSchema(Array(label, denseMatrixFeatures),
+    schemaMatrixWithLabelsAndFeatures)
+  val sparseMatrixRowWithLabels : Row = new GenericRowWithSchema(Array(label, sparseMatrixFeatures),
+    schemaMatrixWithLabelsAndFeatures)
   val denseRowWithoutLabels : Row = new GenericRowWithSchema(Array(denseFeatures),
     schemaWithoutLabels)
   val sparseRowWithoutLabels : Row = new GenericRowWithSchema(Array(sparseFeatures),
     schemaWithoutLabels)
-
+  val denseMatrixRowWithoutLabels : Row = new GenericRowWithSchema(Array(denseMatrixFeatures),
+    schemaMatrixWithoutLabels)
+  val sparseMatrixRowWithoutLabels : Row = new GenericRowWithSchema(Array(sparseMatrixFeatures),
+    schemaMatrixWithoutLabels)  
 
   it should "convert a dense row without labels to protobuf" in {
     val protobufRecord = ProtobufConverter.rowToProtobuf(denseRowWithoutLabels,
@@ -65,6 +80,18 @@ class ProtobufConverterTests extends FlatSpec with MockitoSugar with BeforeAndAf
     val protobufRecord = ProtobufConverter.rowToProtobuf(sparseRowWithoutLabels,
       featuresColumnName, Some(labelColumnName))
     validateSparse(protobufRecord, sparseFeatures)
+  }
+
+  it should "convert a dense Matrix without labels to protobuf" in {
+    val protobufRecord = ProtobufConverter.rowToProtobuf(denseMatrixRowWithoutLabels,
+      featuresColumnName, Some(labelColumnName))
+    validateDense(protobufRecord, denseMatrixFeatures)
+  }
+
+  it should "convert a sparse Matrix without labels to protobuf" in {
+    val protobufRecord = ProtobufConverter.rowToProtobuf(sparseMatrixRowWithoutLabels,
+      featuresColumnName, Some(labelColumnName))
+    validateSparse(protobufRecord, sparseMatrixFeatures)
   }
 
   it should "convert a dense row with labels to protobuf" in {
@@ -79,6 +106,13 @@ class ProtobufConverterTests extends FlatSpec with MockitoSugar with BeforeAndAf
       featuresColumnName, Some(labelColumnName))
     assert(label == recordToLabel(protobufRecord))
     validateSparse(protobufRecord, sparseFeatures)
+  }
+
+  it should "convert a dense Matrix with labels to protobuf" in {
+    val protobufRecord = ProtobufConverter.rowToProtobuf(denseMatrixRowWithLabels,
+      featuresColumnName, Some(labelColumnName))
+    assert(label == recordToLabel(protobufRecord))
+    validateDense(protobufRecord, denseMatrixFeatures)
   }
 
   it should "encode a sparse protobuf record with labels in RecordIO" in {
@@ -130,6 +164,19 @@ class ProtobufConverterTests extends FlatSpec with MockitoSugar with BeforeAndAf
     }
   }
 
+  private def validateDense(record: Record, denseMatrix: DenseMatrix) : Unit = {
+    val recordValuesList = recordToValuesList(record)
+    val recordShape = recordToMatrixShape(record)
+    assert(recordShape(0) == denseMatrix.numRows)
+    assert(recordShape(1) == denseMatrix.numCols)
+
+    val denseMatrixArray = denseMatrix.toArray
+    assert(recordValuesList.size == denseMatrixArray.length)
+    for ((recordValue, value) <- recordValuesList zip denseMatrixArray) {
+      assert(value == recordValue)
+    }
+  }
+
   private def validateSparse(record: Record, sparseVector: SparseVector) : Unit = {
     val recordValuesList = recordToValuesList(record)
     val recordKeysList = recordToKeysList(record)
@@ -144,14 +191,46 @@ class ProtobufConverterTests extends FlatSpec with MockitoSugar with BeforeAndAf
     assert(recordToShape(record) == sparseVector.size)
   }
 
+  private def validateSparse(record: Record, sparseMatrix: SparseMatrix) : Unit = {
+    val recordValuesList = recordToValuesList(record)
+    val recordKeysList = matrixRecordToKeysList(record)
+    val recordShape = recordToMatrixShape(record)
+    assert(recordShape(0) == sparseMatrix.numRows)
+    assert(recordShape(1) == sparseMatrix.numCols)    
+    var idx = 0
+    for (value <- sparseMatrix.values) {
+      if (value != 0d) {
+        assert(value == recordValuesList(idx))
+        idx += 1
+      }
+    }
+
+    val rowIndicesSize = recordKeysList(0).toInt
+    val colPtrsSize = recordKeysList(1).toInt    
+    val newSparseMatrix = new SparseMatrix(recordShape(0).toInt, recordShape(1).toInt,
+      recordKeysList.subList(2 + rowIndicesSize, recordKeysList.size).asScala.toArray.map(_.toInt),
+      recordKeysList.subList(2, 2 + rowIndicesSize).asScala.toArray.map(_.toInt),
+      recordValuesList.asScala.toArray.map(_.toDouble))
+
+    assert(newSparseMatrix.equals(sparseMatrix))
+  }
+
   private def recordToKeysList(record: Record) : java.util.List[java.lang.Long] = {
     validateSparseRecord(record)
     getFeaturesTensorFromRecord(record).getKeysList
   }
 
+  private def matrixRecordToKeysList(record: Record) : java.util.List[java.lang.Long] = {
+    getFeaturesTensorFromRecord(record).getKeysList
+  }  
+
   private def recordToShape(record: Record) : java.lang.Long = {
     validateSparseRecord(record)
     getFeaturesTensorFromRecord(record).getShape(0)
+  }
+
+  private def recordToMatrixShape(record: Record) : java.util.List[java.lang.Long] = {
+    getFeaturesTensorFromRecord(record).getShapeList
   }
 
   private def recordToLabel(record: Record) : Float = {
